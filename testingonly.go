@@ -221,10 +221,69 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"success", "message":"Bot is up and running"}`))
 }
 
+func sendDirectMessageHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract user ID from URL
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid request URL", http.StatusBadRequest)
+		return
+	}
+	userID := parts[2] // Extract user ID from "/sendto/{user}"
+
+	// Read JSON request body
+	var requestData struct {
+		Message string `json:"message"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&requestData)
+	if err != nil {
+		http.Error(w, "Invalid JSON request", http.StatusBadRequest)
+		return
+	}
+
+	// Construct the user's JID
+	userJID := types.NewJID(userID, types.DefaultUserServer)
+
+	// Send the message
+	err = sendDirectMessage(userJID, requestData.Message)
+	if err != nil {
+		http.Error(w, "Failed to send message", http.StatusInternalServerError)
+		return
+	}
+
+	// Response
+	response := map[string]string{
+		"status":  "success",
+		"user":    userID,
+		"message": requestData.Message,
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// Send a direct message to a specific user
+func sendDirectMessage(jid types.JID, message string) error {
+	if client == nil {
+		return fmt.Errorf("WhatsApp client is not initialized")
+	}
+
+	msg := &waProto.Message{
+		Conversation: proto.String(message),
+	}
+
+	_, err := client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		log.Println("Failed to send direct message:", err)
+		return err
+	}
+
+	log.Println("Direct message sent successfully to:", jid.String())
+	return nil
+}
+
 // Start HTTP Server
 func startHTTPServer() {
 	http.HandleFunc("/send", httpHandler)
 	http.HandleFunc("/status", statusHandler)
+	http.HandleFunc("/sendto/", sendDirectMessageHandler)
 	serverAddr := ":6666"
 	fmt.Println("HTTP Server started on", serverAddr)
 	log.Fatal(http.ListenAndServe(serverAddr, nil))
