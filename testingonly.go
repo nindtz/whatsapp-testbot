@@ -163,6 +163,55 @@ func sendMessage(jid types.JID, message string) {
 	}
 }
 
+// HTTP Handler to receive POST requests
+func httpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST requests allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Parse JSON
+	var requestData map[string]string
+	err = json.Unmarshal(body, &requestData)
+	if err != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	// Extract message
+	message, exists := requestData["message"]
+	if !exists {
+		http.Error(w, "Missing 'message' field", http.StatusBadRequest)
+		return
+	}
+
+	// Send the message to WhatsApp
+	// sendMessage(types.JID{User: allowedGroupJID}, message)
+
+	groupJID := types.NewJID(strings.Split(allowedGroupJID, "@")[0], types.GroupServer)
+	sendMessage(groupJID, message)
+
+	// Send a success response
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success", "message":"Sent successfully"}`))
+}
+
+// Start HTTP Server
+func startHTTPServer() {
+	http.HandleFunc("/send", httpHandler)
+	serverAddr := ":6666"
+	fmt.Println("HTTP Server started on", serverAddr)
+	log.Fatal(http.ListenAndServe(serverAddr, nil))
+}
+
 func main() {
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
 	container, err := sqlstore.New("sqlite3", "file:examplestore.db?_foreign_keys=on", dbLog)
@@ -202,7 +251,7 @@ func main() {
 	}
 
 	fmt.Println("Bot is running...")
-
+	go startHTTPServer()
 	// Listen for Ctrl+C
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
