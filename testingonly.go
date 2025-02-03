@@ -204,9 +204,27 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"success", "message":"Sent successfully"}`))
 }
 
+func statusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Only GET requests allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Send the message to WhatsApp
+	// sendMessage(types.JID{User: allowedGroupJID}, message)
+
+	groupJID := types.NewJID(strings.Split(allowedGroupJID, "@")[0], types.GroupServer)
+	sendMessage(groupJID, "Bot is up and running")
+
+	// Send a success response
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success", "message":"Bot is up and running"}`))
+}
+
 // Start HTTP Server
 func startHTTPServer() {
 	http.HandleFunc("/send", httpHandler)
+	http.HandleFunc("/status", statusHandler)
 	serverAddr := ":6666"
 	fmt.Println("HTTP Server started on", serverAddr)
 	log.Fatal(http.ListenAndServe(serverAddr, nil))
