@@ -105,10 +105,12 @@ func processCommand(msg *events.Message) {
 		senderID := msg.Info.Sender.String()
 
 		sendMessageWithReply(msg.Info.Chat, response, quotedMsg, msgID, senderID)
-	} else if text == "hello" {
+	} else if strings.HasPrefix(text, "hello") {
 		// Create JSON payload
+		words := strings.Split(text, " ")
+		joinedWords := strings.Join(words[1:], " ")
 		payload := map[string]string{
-			"message": "Hello from WhatsApp bot!",
+			"message": "The sender is " + joinedWords,
 		}
 		jsonData, err := json.Marshal(payload)
 		if err != nil {
