@@ -88,6 +88,13 @@ func processCommand(msg *events.Message) {
 
 		// Send response to the group
 		sendMessage(msg.Info.Chat, response)
+	} else if text == "halo" {
+		// currentTime := time.Now().Format("15:04:05, Monday, Jan 2 2006")
+		response := "Halo " + msg.Info.PushName
+
+		// Send response to the group
+		sendMessage(msg.Info.Chat, response)
+
 	} else if text == "date" {
 		currentTime := time.Now().Format("15:04:05, Monday, Jan 2 2006")
 		response := "🕒 Current time: " + currentTime
