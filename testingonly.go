@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -94,6 +98,50 @@ func processCommand(msg *events.Message) {
 		senderID := msg.Info.Sender.String()
 
 		sendMessageWithReply(msg.Info.Chat, response, quotedMsg, msgID, senderID)
+	} else if text == "hello" {
+		// Create JSON payload
+		payload := map[string]string{
+			"message": "Hello from WhatsApp bot!",
+		}
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			log.Println("Error marshaling JSON:", err)
+			return
+		}
+
+		// Make an HTTP POST request
+		resp, err := http.Post("http://127.0.0.1:5002", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Println("Error making POST request:", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Reading the response body
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Println("Error reading response body:", err)
+			return
+		}
+
+		// Parsing the JSON response
+		var responseData map[string]string
+		err = json.Unmarshal(body, &responseData)
+		if err != nil {
+			log.Println("Error unmarshaling JSON:", err)
+			return
+		}
+
+		// Extracting the "reply" value
+		reply, exists := responseData["reply"]
+		if !exists {
+			log.Println("Key 'reply' not found in response")
+			return
+		}
+
+		// Printing the final response
+		finalResponse := "🌐 Response from server: " + reply // json.Unmarshal(body, &reply)
+		sendMessage(msg.Info.Chat, finalResponse)
 	}
 }
 
