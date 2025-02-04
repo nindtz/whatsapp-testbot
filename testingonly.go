@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +20,7 @@ import (
 	"time"
 
 	"image/jpeg"
+	"image/png"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/nfnt/resize"
@@ -30,9 +35,39 @@ import (
 )
 
 var (
-	client          *whatsmeow.Client
-	allowedGroupJID = "120363395779921603@g.us" // Replace with your actual group JID
+	client           *whatsmeow.Client
+	allowedGroupJIDs = []string{
+		"120363395779921603@g.us", // Replace with your actual group JIDs
+		"120363399999999999@g.us",
+		"120363388888888888@g.us",
+	}
 )
+
+// Helper function to check if a group is in the allowed list
+func isAllowedGroup(chatJID string) bool {
+	for _, groupJID := range allowedGroupJIDs {
+		if chatJID == groupJID {
+			return true
+		}
+	}
+	return false
+}
+
+func formatWithCommas(s string) string {
+	n := len(s)
+	if n <= 3 {
+		return s
+	}
+	remainder := n % 3
+	if remainder == 0 {
+		remainder = 3
+	}
+	result := s[:remainder]
+	for i := remainder; i < n; i += 3 {
+		result += "." + s[i:i+3]
+	}
+	return result
+}
 
 // Handles incoming messages
 func eventHandler(evt interface{}) {
@@ -40,8 +75,8 @@ func eventHandler(evt interface{}) {
 	case *events.Message:
 		chatJID := v.Info.Chat.String()
 
-		// Only process messages from the allowed group
-		if chatJID == allowedGroupJID {
+		// Only process messages from the allowed groups
+		if isAllowedGroup(chatJID) {
 			processCommand(v)
 		}
 	}
@@ -69,7 +104,34 @@ func sendMessageWithReply(chat types.JID, response string, quotedMsg *waProto.Me
 	}
 }
 
-// Processes commands
+func sendImageMessageWithReply(chat types.JID, imgMsg *waProto.ImageMessage, quotedMsg *waProto.Message, msgID, senderID string) {
+	if client == nil {
+		log.Println("Client is not initialized")
+		return
+	}
+
+	// Add ContextInfo to ImageMessage
+	imgMsg.ContextInfo = &waProto.ContextInfo{
+		StanzaID:      proto.String(msgID), // Corrected field name
+		Participant:   proto.String(senderID),
+		QuotedMessage: quotedMsg,
+	}
+
+	// Construct message payload
+	message := &waProto.Message{
+		ImageMessage: imgMsg,
+	}
+
+	// Send the message
+	_, err := client.SendMessage(context.Background(), chat, message)
+	if err != nil {
+		log.Println("Failed to send image message:", err)
+	} else {
+		log.Println("Image message sent successfully!")
+	}
+}
+
+// Ini commands di sebuah group
 func processCommand(msg *events.Message) {
 	// Ensure client is initialized
 	if client == nil {
@@ -202,7 +264,138 @@ func processCommand(msg *events.Message) {
 		// Printing the final response
 		finalResponse := "🌐 Response from server: " + reply // json.Unmarshal(body, &reply)
 		sendMessage(msg.Info.Chat, finalResponse)
+	} else if strings.HasPrefix(strings.ToLower(text), "donate") {
+		// Create JSON payload
+		words := strings.Split(text, " ")
+		joinedWords := strings.Join(words[1:], " ")
+		caption := "Donation " + joinedWords
+		payload := map[string]string{
+			"message": caption,
+		}
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			log.Println("Error marshaling JSON:", err)
+			return
+		}
+
+		// Make an HTTP POST request
+		resp, err := http.Post("http://127.0.0.1:5002/", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Println("Error making POST request:", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Reading the response body (image data)
+		fileData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Println("Error reading response body:", err)
+			return
+		}
+		// Create a temporary file
+		tempFile, err := ioutil.TempFile("", "tempImage-*.png")
+		if err != nil {
+			log.Println("Error creating temporary file:", err)
+			return
+		}
+		defer os.Remove(tempFile.Name()) // Clean up the temp file afterward
+
+		// Write fileData to the temporary file
+		if _, err := tempFile.Write(fileData); err != nil {
+			log.Println("Error writing to temporary file:", err)
+			return
+		}
+		if err := tempFile.Close(); err != nil {
+			log.Println("Error closing temporary file:", err)
+			return
+		}
+
+		// Use the tempFile.Name() as the filePath
+		filePath := tempFile.Name()
+
+		// Upload the image to WhatsApp server
+		uploaded, err := uploadImage(fileData)
+		if err != nil {
+			log.Println("Error uploading image:", err)
+			return
+		}
+		log.Println("Uploaded Image Response:", uploaded)
+		// Convert base64 strings to []byte
+		mediaKey, _ := base64.StdEncoding.DecodeString(uploaded["MediaKey"])
+		fileEncSHA256, _ := base64.StdEncoding.DecodeString(uploaded["FileEncSHA256"])
+		fileSHA256, _ := base64.StdEncoding.DecodeString(uploaded["FileSHA256"])
+
+		thumbnail, err := generateJPEGThumbnail(filePath)
+		if err != nil {
+			log.Println("Failed to generate thumbnail:", err)
+			thumbnail = nil // WhatsApp can still send without it
+		}
+
+		caption = "Here is your donation for Rp" + formatWithCommas(joinedWords) + ",-"
+		// Creating WhatsApp ImageMessage
+		imgMsg := &waProto.ImageMessage{
+			Caption:       proto.String(caption),
+			URL:           proto.String(uploaded["URL"]),
+			DirectPath:    proto.String(uploaded["DirectPath"]),
+			Mimetype:      proto.String("image/png"),
+			MediaKey:      mediaKey,
+			FileEncSHA256: fileEncSHA256,
+			FileSHA256:    fileSHA256,
+			FileLength:    proto.Uint64(uint64(len(fileData))),
+			JPEGThumbnail: thumbnail,
+		}
+
+		// Send image message
+		//sendImageMessage(msg.Info.Chat, imgMsg)
+
+		sendImageMessageWithReply(msg.Info.Chat, imgMsg, msg.Message, msg.Info.ID, msg.Info.Sender.String())
+
 	}
+
+}
+
+func sendImageMessage(jid types.JID, imgMsg *waProto.ImageMessage) {
+	if client == nil {
+		log.Println("Client is not initialized")
+		return
+	}
+
+	// Construct message payload
+	msg := &waProto.Message{
+		ImageMessage: imgMsg,
+	}
+
+	_, err := client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		log.Println("Failed to send message:", err)
+	}
+}
+
+// Function to upload image to WhatsApp server
+func uploadImage(fileData []byte) (map[string]string, error) {
+	if len(fileData) == 0 {
+		log.Println("Error: fileData is empty, cannot upload")
+		return nil, errors.New("fileData is empty")
+	}
+
+	log.Println("Uploading image of size:", len(fileData))
+
+	// Perform the upload
+	uploaded, err := client.Upload(context.Background(), fileData, whatsmeow.MediaImage)
+	if err != nil {
+		log.Println("Error uploading image:", err)
+		return nil, err
+	}
+
+	log.Println("Upload successful:", uploaded)
+
+	return map[string]string{
+		"URL":           uploaded.URL,
+		"DirectPath":    uploaded.DirectPath,
+		"MediaKey":      base64.StdEncoding.EncodeToString(uploaded.MediaKey),
+		"FileEncSHA256": base64.StdEncoding.EncodeToString(uploaded.FileEncSHA256),
+		"FileSHA256":    base64.StdEncoding.EncodeToString(uploaded.FileSHA256),
+	}, nil
 }
 
 // Sends a WhatsApp message
@@ -255,7 +448,7 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send the message to WhatsApp
 	// sendMessage(types.JID{User: allowedGroupJID}, message)
-
+	allowedGroupJID := allowedGroupJIDs[0]
 	groupJID := types.NewJID(strings.Split(allowedGroupJID, "@")[0], types.GroupServer)
 	sendMessage(groupJID, message)
 
@@ -272,7 +465,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send the message to WhatsApp
 	// sendMessage(types.JID{User: allowedGroupJID}, message)
-
+	allowedGroupJID := allowedGroupJIDs[0]
 	groupJID := types.NewJID(strings.Split(allowedGroupJID, "@")[0], types.GroupServer)
 	sendMessage(groupJID, "Bot is up and running")
 
@@ -355,16 +548,26 @@ func sendMessageWithFileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ Parse the file
-	file, _, err := r.FormFile("file1")
+	// Parse the file
+	file, header, err := r.FormFile("file1")
 	if err != nil {
 		http.Error(w, "File upload failed", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	// Save the file locally (Optional)
-	tempFile, err := os.CreateTemp("", "upload-*")
+	// Generate a unique suffix with the original filename
+	originalFilename := header.Filename
+	timestamp := time.Now().Format("20060102")
+
+	if err != nil {
+		http.Error(w, "Failed to generate random suffix", http.StatusInternalServerError)
+		return
+	}
+	newFilename := strings.TrimSuffix(originalFilename, filepath.Ext(originalFilename)) + "-" + timestamp + filepath.Ext(originalFilename)
+
+	// Save the file locally
+	tempFile, err := os.Create(filepath.Join(os.TempDir(), newFilename))
 	if err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
 		return
@@ -398,18 +601,40 @@ func sendMessageWithFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(response)
 }
+
 func generateJPEGThumbnail(filePath string) ([]byte, error) {
-	// Open the JPEG file
+	// Open the image file
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %v", err)
 	}
 	defer file.Close()
 
-	// Decode the JPEG into image.Image
-	img, err := jpeg.Decode(file)
+	// Decode the image to identify its format
+	img, imgType, err := image.Decode(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode JPEG: %v", err)
+		return nil, fmt.Errorf("failed to decode image: %v", err)
+	}
+	log.Println("Image type:", imgType)
+
+	// Reset file pointer to the beginning for re-decoding if necessary
+	if _, err := file.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("failed to seek file: %v", err)
+	}
+
+	// Convert PNG to JPEG if necessary
+	if imgType == "png" {
+		img, err = png.Decode(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode PNG: %v", err)
+		}
+	} else if imgType == "jpeg" {
+		img, err = jpeg.Decode(file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode JPEG: %v", err)
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported image type: %v", imgType)
 	}
 
 	// Resize the image to a thumbnail with a max width and height of 72 pixels
@@ -443,7 +668,6 @@ func generateJPEGThumbnail(filePath string) ([]byte, error) {
 
 	// Return the thumbnail as a byte slice
 	return thumbnailBytes, nil
-
 }
 
 func detectFileType(filePath string) (string, error) {
@@ -505,8 +729,9 @@ func sendMessageWithFile(jid types.JID, message, filePath string) error {
 		// Construct a DocumentMessage with a thumbnail (if needed)
 		msg = &waProto.Message{
 			DocumentMessage: &waProto.DocumentMessage{
+				Caption:       proto.String(message),
 				URL:           proto.String(uploaded.URL),
-				Title:         proto.String(message),
+				Title:         proto.String(fileName),
 				DirectPath:    proto.String(uploaded.DirectPath),
 				Mimetype:      proto.String(mimeType),
 				MediaKey:      uploaded.MediaKey,
