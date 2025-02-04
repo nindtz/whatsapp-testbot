@@ -79,23 +79,23 @@ func processCommand(msg *events.Message) {
 		return
 	}
 
-	text = strings.ToLower(text) // Convert to lowercase for case-insensitive commands
+	// text = strings.ToLower(text) // Convert to lowercase for case-insensitive commands
 
 	// Handle "time" command
-	if text == "time" {
+	if strings.ToLower(text) == "time" {
 		currentTime := time.Now().Format("15:04:05, Monday, Jan 2 2006")
 		response := "🕒 Current time: " + currentTime
 
 		// Send response to the group
 		sendMessage(msg.Info.Chat, response)
-	} else if text == "halo" {
+	} else if strings.ToLower(text) == "halo" {
 		// currentTime := time.Now().Format("15:04:05, Monday, Jan 2 2006")
 		response := "Halo " + msg.Info.PushName
 
 		// Send response to the group
 		sendMessage(msg.Info.Chat, response)
 
-	} else if text == "date" {
+	} else if strings.ToLower(text) == "date" {
 		currentTime := time.Now().Format("15:04:05, Monday, Jan 2 2006")
 		response := "🕒 Current time: " + currentTime
 
@@ -105,7 +105,54 @@ func processCommand(msg *events.Message) {
 		senderID := msg.Info.Sender.String()
 
 		sendMessageWithReply(msg.Info.Chat, response, quotedMsg, msgID, senderID)
-	} else if strings.HasPrefix(text, "hello") {
+
+	} else if strings.HasPrefix(strings.ToLower(text), "cuaca") {
+		// Create JSON payload
+		words := strings.Split(text, " ")
+		joinedWords := strings.Join(words[1:], " ")
+		if len(joinedWords) > 1 {
+			payload := map[string]string{
+				"message": "Looking for weather in " + joinedWords,
+			}
+			jsonData, err := json.Marshal(payload)
+			if err != nil {
+				log.Println("Error marshaling JSON:", err)
+				return
+			}
+
+			// Make an HTTP POST request
+			resp, err := http.Post("http://127.0.0.1:5002", "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				log.Println("Error making POST request:", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			// Reading the response body
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Println("Error reading response body:", err)
+				return
+			}
+
+			// Parsing the JSON response
+			var responseData map[string]string
+			err = json.Unmarshal(body, &responseData)
+			// Extracting the "reply" value
+			reply := responseData["reply"]
+
+			// Printing the final response
+			finalResponse := "Sekarang " + reply // json.Unmarshal(body, &reply)
+			quotedMsg := msg.Message
+			msgID := msg.Info.ID
+			senderID := msg.Info.Sender.String()
+
+			sendMessageWithReply(msg.Info.Chat, finalResponse, quotedMsg, msgID, senderID)
+		} else {
+			fmt.Println("The string does not have a second word.")
+		}
+
+	} else if strings.HasPrefix(strings.ToLower(text), "hello") {
 		// Create JSON payload
 		words := strings.Split(text, " ")
 		joinedWords := strings.Join(words[1:], " ")
