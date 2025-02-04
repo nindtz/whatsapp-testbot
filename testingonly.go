@@ -10,11 +10,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"image/jpeg"
+
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/nfnt/resize"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -335,11 +339,223 @@ func sendDirectMessage(jid types.JID, message string) error {
 	return nil
 }
 
+func sendMessageWithFileHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract user ID from URL
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 3 {
+		http.Error(w, "Invalid request URL", http.StatusBadRequest)
+		return
+	}
+	userID := parts[2] // Extract user ID from "/sendto/{user}"
+
+	// ✅ Parse the "message" from form-data
+	message := r.FormValue("message")
+	if message == "" {
+		http.Error(w, "Missing 'message' field", http.StatusBadRequest)
+		return
+	}
+
+	// ✅ Parse the file
+	file, _, err := r.FormFile("file1")
+	if err != nil {
+		http.Error(w, "File upload failed", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Save the file locally (Optional)
+	tempFile, err := os.CreateTemp("", "upload-*")
+	if err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+	defer tempFile.Close()
+
+	_, err = io.Copy(tempFile, file)
+	if err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+
+	// Get the file path
+	filePath := tempFile.Name()
+
+	// Construct the user's JID
+	userJID := types.NewJID(userID, types.DefaultUserServer)
+
+	// Send the message with the file
+	err = sendMessageWithFile(userJID, message, filePath)
+	if err != nil {
+		http.Error(w, "Failed to send message", http.StatusInternalServerError)
+		return
+	}
+
+	// Response
+	response := map[string]string{
+		"status":  "success",
+		"user":    userID,
+		"message": message,
+	}
+	json.NewEncoder(w).Encode(response)
+}
+func generateJPEGThumbnail(filePath string) ([]byte, error) {
+	// Open the JPEG file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	// Decode the JPEG into image.Image
+	img, err := jpeg.Decode(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode JPEG: %v", err)
+	}
+
+	// Resize the image to a thumbnail with a max width and height of 72 pixels
+	thumbnail := resize.Thumbnail(72, 72, img, resize.Lanczos3)
+
+	// Create a temporary file to store the resized image
+	tempFilePath := filepath.Join(os.TempDir(), "thumbnail.jpg")
+	out, err := os.Create(tempFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer out.Close()
+
+	// Write the resized image to the temporary file
+	err = jpeg.Encode(out, thumbnail, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode JPEG: %v", err)
+	}
+
+	// Read the temporary file back into a byte slice
+	thumbnailBytes, err := os.ReadFile(tempFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read thumbnail file: %v", err)
+	}
+
+	// Clean up the temporary file
+	err = os.Remove(tempFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove temp file: %v", err)
+	}
+
+	// Return the thumbnail as a byte slice
+	return thumbnailBytes, nil
+
+}
+
+func detectFileType(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	buffer := make([]byte, 512)
+	_, err = file.Read(buffer)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %v", err)
+	}
+
+	mimeType := http.DetectContentType(buffer)
+	return mimeType, nil
+}
+
+// sendMessageWithFile sends a message along with a media file
+func sendMessageWithFile(jid types.JID, message, filePath string) error {
+	if client == nil {
+		return fmt.Errorf("WhatsApp client is not initialized")
+	}
+
+	// Read file into a byte slice
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Detect file type from extension
+
+	mimeType, err := detectFileType(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to detect file type: %w", err)
+	}
+
+	var mediaType whatsmeow.MediaType
+	var fileName string = filepath.Base(filePath)
+
+	isPDF := mimeType == "application/pdf"
+	if isPDF {
+		mediaType = whatsmeow.MediaDocument
+	} else {
+		mediaType = whatsmeow.MediaImage // Default to image
+	}
+
+	// Upload file to WhatsApp
+	uploaded, err := client.Upload(context.Background(), fileData, mediaType)
+	if err != nil {
+		return fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	// Create WhatsApp message
+	var msg *waProto.Message
+
+	if isPDF {
+		// Construct a DocumentMessage with a thumbnail (if needed)
+		msg = &waProto.Message{
+			DocumentMessage: &waProto.DocumentMessage{
+				URL:           proto.String(uploaded.URL),
+				Title:         proto.String(message),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				Mimetype:      proto.String(mimeType),
+				MediaKey:      uploaded.MediaKey,
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uint64(len(fileData))),
+				FileName:      proto.String(fileName),
+				// Add other fields if necessary
+			},
+		}
+	} else {
+		// Generate a JPEG thumbnail for the image
+		thumbnail, err := generateJPEGThumbnail(filePath)
+		if err != nil {
+			log.Println("Failed to generate thumbnail:", err)
+			thumbnail = nil // WhatsApp can still send without it
+		}
+		// Construct an ImageMessage
+		msg = &waProto.Message{
+			ImageMessage: &waProto.ImageMessage{
+				Caption:       proto.String(message),
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				MediaKey:      uploaded.MediaKey,
+				Mimetype:      proto.String(mimeType),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uint64(len(fileData))),
+				JPEGThumbnail: thumbnail,
+			},
+		}
+	}
+
+	// Send the message
+	_, err = client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	fmt.Println("Message with file sent successfully to:", jid.String())
+	return nil
+}
+
 // Start HTTP Server
 func startHTTPServer() {
 	http.HandleFunc("/send", httpHandler)
 	http.HandleFunc("/status", statusHandler)
 	http.HandleFunc("/sendto/", sendDirectMessageHandler)
+	http.HandleFunc("/sendfile/", sendMessageWithFileHandler)
 	serverAddr := ":6666"
 	fmt.Println("HTTP Server started on", serverAddr)
 	log.Fatal(http.ListenAndServe(serverAddr, nil))
